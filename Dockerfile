@@ -26,9 +26,12 @@ RUN cargo chef prepare --recipe-path recipe.json
 # ── builder: cook deps (cached), then build eez-node ─────────────────
 FROM chef AS builder
 # CI can override release optimization for faster candidate builds.
+# DEBUG defaults to 0 rather than mirroring the workspace release profile: the
+# binaries are stripped below, so debuginfo is discarded anyway, and carrying it
+# through the thin-LTO link of the reth graph is what OOMs a <16 GiB builder.
 ARG CARGO_PROFILE_RELEASE_LTO=thin
 ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
-ARG CARGO_PROFILE_RELEASE_DEBUG=1
+ARG CARGO_PROFILE_RELEASE_DEBUG=0
 ENV CARGO_PROFILE_RELEASE_LTO=${CARGO_PROFILE_RELEASE_LTO} \
     CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS} \
     CARGO_PROFILE_RELEASE_DEBUG=${CARGO_PROFILE_RELEASE_DEBUG}
