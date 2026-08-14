@@ -67,15 +67,26 @@ signed transaction to a cross-chain front.
 eez_status
 ```
 
-The proof signer refuses any window wider than **512 L2 blocks**, and the window
-only grows. If posting stalls — a laptop sleeping for a few minutes is enough —
-the gap passes the cap and settlement never recovers. Every slot then fails with
-`window quota: window N..=M spans … blocks, limit is 512`, the safe head freezes,
-and every cross-chain transaction you send afterwards waits in the held pool
-forever.
+The number that matters is the **unposted window**, printed as `window N / 512`:
 
-`eez_status` warns when the gap is over 512. There is no repair; restart the
-enclave. Sections A and B still work on a stalled enclave — section C does not.
+```
+window = L2 latest − L2 safe
+```
+
+That is the span the composer still has to get proven and posted. The proof
+signer refuses any window wider than **512 L2 blocks**, and an unposted window
+only grows — once past the cap it can never come back under it. If posting
+stalls (a laptop sleeping for a few minutes is enough) every slot then fails
+with `window quota: window N..=M spans … blocks, limit is 512`, the safe head
+freezes, and every cross-chain transaction you send afterwards waits in the held
+pool forever. There is no repair; restart the enclave. Sections A and B still
+work on a stalled enclave — section C does not.
+
+**L2 height being roughly six times L1 height is not a lag.** The sequencer
+produces `K = l1_block_time / l2_block_time` blocks per L1 block — six on the CI
+profile — so `L1 200 / L2 1200` means the chains are exactly in step. Only
+`latest − safe` says anything about settlement, and in steady state it sits
+between 0 and about 6.
 
 ---
 
@@ -274,7 +285,8 @@ cast block safe --field number --rpc-url $L2  # safe head — only on settlement
 
 | Symptom | Cause |
 |---|---|
-| `eez_status` reports settlement stalled | Window past the 512-block signer cap. Unrecoverable — restart the enclave. |
+| `eez_status` shows `window N / 512 ** STALLED **` | Unposted window past the signer cap. Unrecoverable — restart the enclave. |
+| L2 height is ~6x L1 height | Normal. K = 6 L2 blocks per L1 block. Not a settlement problem. |
 | Cross-chain tx accepted, never lands | Settlement stalled, or the bundle keeps dropping. Check `eez-node` logs for `bundle`. |
 | `cast send` to a front fails on gas estimation | Expected. Use `cast mktx` + `xsend`. |
 | Front rejects the tx outright | Wrong direction for that endpoint, or the wrong source chain id in the signature. |

@@ -146,16 +146,25 @@ eez_status() {
     printf '  registry %s  rollupId %s\n' "${EEZ_REGISTRY_ADDRESS:-?}" "${EEZ_ROLLUP_ID:-?}"
     printf '  heads    L1 %s   L2 %s (safe %s)\n' "${l1h:-?}" "${l2h:-?}" "${l2s:-?}"
 
-    # The proof signer refuses a window wider than 512 L2 blocks, and the
-    # window only grows — once past the cap, settlement never recovers.
+    # The only number that matters for settlement health is the UNPOSTED
+    # WINDOW: L2 latest minus L2 safe. The proof signer refuses a window
+    # wider than 512 L2 blocks, and an unposted window only grows — once
+    # past the cap it can never come back under it.
+    #
+    # L2 height being ~6x L1 height is normal, not a lag: the sequencer
+    # produces K = L1_block_time / L2_block_time blocks per L1 block.
     if [ -n "$l2h" ] && [ -n "$l2s" ]; then
         gap=$(( l2h - l2s ))
+        printf '  window   %s / 512 unposted L2 blocks' "$gap"
         if [ "$gap" -gt 512 ]; then
-            printf '\n  SETTLEMENT STALLED — safe head is %s blocks behind (signer cap is 512).\n' "$gap"
-            printf '  It cannot recover. Cross-chain txs will hang in the held pool forever.\n'
+            printf '  ** STALLED **\n'
+            printf '\n  Settlement is past the signer cap and cannot recover.\n'
+            printf '  Cross-chain txs will hang in the held pool forever.\n'
             printf '  Fix: bash testing/kurtosis/stop.sh && bash testing/kurtosis/start.sh\n'
         elif [ "$gap" -gt 256 ]; then
-            printf '\n  Settlement lagging: %s blocks behind, cap is 512. Watch it.\n' "$gap"
+            printf '  -- lagging, watch it\n'
+        else
+            printf '  ok\n'
         fi
     fi
 }
