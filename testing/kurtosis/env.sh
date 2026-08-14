@@ -82,6 +82,17 @@ BUILDER="$(_eez_port el-2-reth-builder-lighthouse rbuilder-rpc)"
 BEACON="$(_eez_port eez-follower http)"
 export L1 L2 L1F L2F BUILDER BEACON
 
+# Explorers, present only when the network was started via dev-up.sh.
+BLOCKSCOUT="$(_eez_port blockscout-frontend http)"
+DORA="$(_eez_port dora http)"
+OTTERSCAN=""
+if command -v docker >/dev/null 2>&1; then
+    _eez_ots_port="$(docker port "${EEZ_OTTERSCAN_NAME:-eez-otterscan}" 80/tcp 2>/dev/null | head -1)"
+    [ -n "$_eez_ots_port" ] && OTTERSCAN="http://localhost:${_eez_ots_port##*:}"
+    unset _eez_ots_port
+fi
+export BLOCKSCOUT DORA OTTERSCAN
+
 # ── deployment addresses ─────────────────────────────────────────────
 # EEZ_REGISTRY_ADDRESS, EEZ_ROLLUP_ID, EEZL2_ADDRESS, EEZ_L1_L2_PROXY, …
 EEZ_DEPLOY_DIR="${TMPDIR:-/tmp}/eez-env-$KURTOSIS_ENCLAVE"
@@ -156,7 +167,12 @@ eez_status() {
     if [ -n "$l2h" ] && [ -n "$l2s" ]; then
         gap=$(( l2h - l2s ))
         printf '  window   %s / 512 unposted L2 blocks' "$gap"
-        if [ "$gap" -gt 512 ]; then
+        if [ "$l2s" = "0" ] && [ "$gap" -le 512 ]; then
+            # Nothing posted yet. On a fresh network the builder needs a couple
+            # of minutes to register with the relay and start winning slots, so
+            # the window climbs to a few hundred and then snaps back.
+            printf '  -- warming up, no batch posted yet\n'
+        elif [ "$gap" -gt 512 ]; then
             printf '  ** STALLED **\n'
             printf '\n  Settlement is past the signer cap and cannot recover.\n'
             printf '  Cross-chain txs will hang in the held pool forever.\n'
@@ -166,6 +182,13 @@ eez_status() {
         else
             printf '  ok\n'
         fi
+    fi
+
+    if [ -n "$OTTERSCAN$BLOCKSCOUT$DORA" ]; then
+        printf '\n'
+        [ -n "$OTTERSCAN" ]  && printf '  L2 explorer  %s   (Otterscan)\n'  "$OTTERSCAN"
+        [ -n "$BLOCKSCOUT" ] && printf '  L1 explorer  %s   (Blockscout)\n' "$BLOCKSCOUT"
+        [ -n "$DORA" ]       && printf '  L1 beacon    %s   (Dora)\n'       "$DORA"
     fi
 }
 

@@ -60,6 +60,9 @@ Useful overrides:
   committed test genesis; it contains no private key.
 - `run-ci.sh`: CI lifecycle, proof-flow gate, and result owner.
 - `start.sh` and `stop.sh`: local lifecycle helpers.
+- `dev-up.sh`: `start.sh` plus block explorers — Blockscout and Dora for L1
+  (injected into a derived args file, so `ci-args.yaml` and CI are untouched)
+  and an Otterscan container on the host for L2.
 - `env.sh`: per-shell session init for manual work — resolves the enclave's
   randomised ports, deployment addresses, and dev keys, and reports whether
   settlement is still inside the prover's window quota. Source it, don't run it.

@@ -12,7 +12,8 @@ Prerequisites: Docker, Kurtosis, Foundry, `jq`, `curl`, and the initialised
 
 ```bash
 bash testing/kurtosis/start.sh    # build images + bring up the enclave
-bash testing/kurtosis/stop.sh     # tear it down
+bash testing/kurtosis/dev-up.sh   # same, plus block explorers (see section D)
+bash testing/kurtosis/stop.sh     # tear it all down
 ```
 
 Rebuilding the images takes a while. To reuse what you already have:
@@ -81,6 +82,14 @@ with `window quota: window N..=M spans … blocks, limit is 512`, the safe head
 freezes, and every cross-chain transaction you send afterwards waits in the held
 pool forever. There is no repair; restart the enclave. Sections A and B still
 work on a stalled enclave — section C does not.
+
+**A freshly started network posts nothing for the first two or three minutes.**
+The rbuilder has to register with the relay and start winning slots before a
+bundle can land, so the composer's early `postBatch` attempts are all dropped
+with `target block passed without inclusion` and the window climbs into the
+low hundreds before snapping back to single digits. `eez_status` labels this
+`warming up, no batch posted yet`. It only deserves attention if the window is
+still growing past a few hundred by L1 block 50 or so.
 
 **L2 height being roughly six times L1 height is not a lag.** The sequencer
 produces `K = l1_block_time / l2_block_time` blocks per L1 block — six on the CI
@@ -261,6 +270,40 @@ this is still true.
 ---
 
 ## D. Watching it
+
+### In a browser
+
+Start the network with `dev-up.sh` instead of `start.sh` and you get three
+explorers. `env.sh` prints their URLs, and exports them as `$OTTERSCAN`,
+`$BLOCKSCOUT` and `$DORA`.
+
+| Explorer | Covers | Where it runs |
+|---|---|---|
+| Otterscan | **L2** — blocks, txs, internal calls | container on the host, port 5100 |
+| Blockscout | **L1** — full indexed explorer | inside the enclave, port 3000 |
+| Dora | **L1 beacon** — slots, validators, forks | inside the enclave |
+
+Otterscan is the one you want for cross-chain work: it renders internal calls,
+so a Sync block shows the `loadExecutionTable` system transactions and the proxy
+call frames underneath a cross-chain transaction, which is exactly the structure
+sections C1 and C2 are about.
+
+Two things to know. Blockscout indexes from genesis, so give it a minute or two
+after startup before it looks complete. And the L2's chain id is **1** — the same
+as Ethereum mainnet — so explorers that key metadata off chain id may show
+mainnet branding, token names or prices. Ignore it; nothing about the chain data
+is wrong.
+
+`dev-up.sh` removes any existing enclave first, since Kurtosis cannot add a
+service that already exists. It reuses the current images unless you set
+`EEZ_DEV_BUILD=1`.
+
+This works because `main.star` starts the L2 with `--http.api=…,ots,trace,debug`
+and `--http.corsdomain='*'`: `ots` is the Otterscan namespace, which reth
+implements, and the permissive origin is needed because the *browser*, not the
+container, calls the RPC. Both are test-harness-only settings.
+
+### In the terminal
 
 ```bash
 kurtosis enclave inspect $KURTOSIS_ENCLAVE
