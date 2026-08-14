@@ -60,6 +60,11 @@ Useful overrides:
   committed test genesis; it contains no private key.
 - `run-ci.sh`: CI lifecycle, proof-flow gate, and result owner.
 - `start.sh` and `stop.sh`: local lifecycle helpers.
+- `env.sh`: per-shell session init for manual work — resolves the enclave's
+  randomised ports, deployment addresses, and dev keys, and reports whether
+  settlement is still inside the prover's window quota. Source it, don't run it.
+- `PLAYBOOK.md`: hands-on guide to driving a running enclave by hand (calling
+  contracts on L1 and L2, and reading L1 state from an L2 transaction).
 - `scripts/verify-cross-chain-waves.sh`: runs the three focused modes and the
   `mixed-pure` stress mode; it does not decide or write the final CI result.
 - `scripts/cross-chain-wave.sh`: inbound, outbound, mixed, and `mixed-pure`
