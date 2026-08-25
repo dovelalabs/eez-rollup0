@@ -521,9 +521,6 @@ Kurtosis assigns different host ports automatically. Remember that
   and the genesis state-root utility copied from the selected node image.
 - `start.sh` and `stop.sh`: local network lifecycle.
 - `ports.sh`: endpoint discovery, summary, and shell exports.
-- `dev-up.sh`: `start.sh` plus block explorers — Blockscout and Dora for L1
-  (injected into a derived args file, so `ci-args.yaml` and CI are untouched)
-  and an Otterscan container on the host for L2.
 - `env.sh`: per-shell session init for manual work — resolves the enclave's
   randomised ports, deployment addresses, and dev keys, and reports whether
   settlement is still inside the prover's window quota. Source it, don't run it.

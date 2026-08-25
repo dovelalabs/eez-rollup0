@@ -171,11 +171,7 @@ def run(plan, args):
             "exec eez-node node",
             "--chain=/out/l2-genesis.json",
             "--datadir=$EEZ_L2_DATADIR",
-            # `ots` (the Otterscan namespace reth implements) plus a permissive CORS
-            # origin let a browser block explorer read this L2 directly.
-            # Test-harness only — the production node config is unaffected.
-            "--http --http.addr=0.0.0.0 --http.port=$EEZ_L2_HTTP_PORT",
-            "--http.api=eth,net,web3,debug,trace,ots --http.corsdomain='*'",
+            "--http --http.addr=0.0.0.0 --http.port=$EEZ_L2_HTTP_PORT --http.api=eth,net,web3,debug,trace",
             "--authrpc.addr=127.0.0.1 --authrpc.port=$EEZ_L2_AUTH_PORT",
             "--port=$EEZ_L2_P2P_PORT --discovery.port=$EEZ_L2_P2P_PORT",
             "--discovery.v5.port=$((EEZ_L2_P2P_PORT+1))",

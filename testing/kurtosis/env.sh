@@ -82,16 +82,10 @@ BUILDER="$(_eez_port el-2-reth-builder-lighthouse rbuilder-rpc)"
 BEACON="$(_eez_port eez-follower http)"
 export L1 L2 L1F L2F BUILDER BEACON
 
-# Explorers, present only when the network was started via dev-up.sh.
-BLOCKSCOUT="$(_eez_port blockscout-frontend http)"
-DORA="$(_eez_port dora http)"
-OTTERSCAN=""
-if command -v docker >/dev/null 2>&1; then
-    _eez_ots_port="$(docker port "${EEZ_OTTERSCAN_NAME:-eez-otterscan}" 80/tcp 2>/dev/null | head -1)"
-    [ -n "$_eez_ots_port" ] && OTTERSCAN="http://localhost:${_eez_ots_port##*:}"
-    unset _eez_ots_port
-fi
-export BLOCKSCOUT DORA OTTERSCAN
+# Blockscout explorers, present when `enable_explorers` is on in the args file.
+L1_EXPLORER="$(_eez_port l1-blockscout-frontend http)"
+L2_EXPLORER="$(_eez_port l2-blockscout-frontend http)"
+export L1_EXPLORER L2_EXPLORER
 
 # ── deployment addresses ─────────────────────────────────────────────
 # EEZ_REGISTRY_ADDRESS, EEZ_ROLLUP_ID, EEZL2_ADDRESS, EEZ_L1_L2_PROXY, …
@@ -184,11 +178,10 @@ eez_status() {
         fi
     fi
 
-    if [ -n "$OTTERSCAN$BLOCKSCOUT$DORA" ]; then
+    if [ -n "$L1_EXPLORER$L2_EXPLORER" ]; then
         printf '\n'
-        [ -n "$OTTERSCAN" ]  && printf '  L2 explorer  %s   (Otterscan)\n'  "$OTTERSCAN"
-        [ -n "$BLOCKSCOUT" ] && printf '  L1 explorer  %s   (Blockscout)\n' "$BLOCKSCOUT"
-        [ -n "$DORA" ]       && printf '  L1 beacon    %s   (Dora)\n'       "$DORA"
+        [ -n "$L1_EXPLORER" ] && printf '  L1 explorer  %s   (Blockscout)\n' "$L1_EXPLORER"
+        [ -n "$L2_EXPLORER" ] && printf '  L2 explorer  %s   (Blockscout)\n' "$L2_EXPLORER"
     fi
 }
 

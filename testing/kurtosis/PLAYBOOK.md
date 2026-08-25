@@ -5,14 +5,13 @@ covers poking at a running enclave from your own shell — calling a contract on
 L2, calling one on L1, and getting an L2 transaction to read L1 state.
 
 For how the pieces fit together (slot ladder, Sync block, settlement), see the
-architecture reference; for the protocol structs, `sync-rollups-protocol/CLAUDE.md`.
+architecture reference; for the protocol structs, `eez-core-protocol/CLAUDE.md`.
 
 Prerequisites: Docker, Kurtosis, Foundry, `jq`, `curl`, and the initialised
-`sync-rollups-protocol` submodule.
+`eez-core-protocol` submodule.
 
 ```bash
 bash testing/kurtosis/start.sh    # build images + bring up the enclave
-bash testing/kurtosis/dev-up.sh   # same, plus block explorers (see section D)
 bash testing/kurtosis/stop.sh     # tear it all down
 ```
 
@@ -273,20 +272,14 @@ this is still true.
 
 ### In a browser
 
-Start the network with `dev-up.sh` instead of `start.sh` and you get three
-explorers. `env.sh` prints their URLs, and exports them as `$OTTERSCAN`,
-`$BLOCKSCOUT` and `$DORA`.
+The default args file starts one Blockscout explorer per chain. `env.sh` prints
+their URLs and exports them as `$L1_EXPLORER` and `$L2_EXPLORER`.
 
-| Explorer | Covers | Where it runs |
-|---|---|---|
-| Otterscan | **L2** — blocks, txs, internal calls | container on the host, port 5100 |
-| Blockscout | **L1** — full indexed explorer | inside the enclave, port 3000 |
-| Dora | **L1 beacon** — slots, validators, forks | inside the enclave |
-
-Otterscan is the one you want for cross-chain work: it renders internal calls,
-so a Sync block shows the `loadExecutionTable` system transactions and the proxy
-call frames underneath a cross-chain transaction, which is exactly the structure
-sections C1 and C2 are about.
+The L2 explorer is the one you want for cross-chain work: once Blockscout has
+indexed a transaction's trace, its internal-transactions view shows the
+`loadExecutionTable` system transactions and the proxy call frames underneath a
+cross-chain transaction, which is exactly the structure sections C1 and C2 are
+about.
 
 Two things to know. Blockscout indexes from genesis, so give it a minute or two
 after startup before it looks complete. And the L2's chain id is **1** — the same
@@ -294,14 +287,8 @@ as Ethereum mainnet — so explorers that key metadata off chain id may show
 mainnet branding, token names or prices. Ignore it; nothing about the chain data
 is wrong.
 
-`dev-up.sh` removes any existing enclave first, since Kurtosis cannot add a
-service that already exists. It reuses the current images unless you set
-`EEZ_DEV_BUILD=1`.
-
-This works because `main.star` starts the L2 with `--http.api=…,ots,trace,debug`
-and `--http.corsdomain='*'`: `ots` is the Otterscan namespace, which reth
-implements, and the permissive origin is needed because the *browser*, not the
-container, calls the RPC. Both are test-harness-only settings.
+To run without explorers set `enable_explorers: false` in a copy of the args
+file (see the README); `env.sh` then simply leaves the two variables empty.
 
 ### In the terminal
 
