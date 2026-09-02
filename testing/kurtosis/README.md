@@ -416,6 +416,52 @@ already-running local enclave and leaves it running. It executes one `inbound`,
 output is stored under `$EEZ_CI_RESULT_DIR/checks`. Override the stress count
 with `EEZ_MIXED_PURE_WAVE_COUNT`.
 
+## Consume this package from another repository
+
+This package is a supported dependency. Another repository can bring the whole
+network up, deploy its own contracts into the enclave, and drive its own
+transaction types through the workload harness, without this repository knowing
+anything about it.
+
+### Deploy your own contracts
+
+The `eez-deployments` step is the seam for a consuming repository's contracts.
+Its contract is fixed in both directions:
+
+| Direction | Contract |
+| --- | --- |
+| In | Exactly six environment variables on the container: `EEZ_L1_RPC_URL`, `EEZ_L1_POSTER_KEY`, `EEZ_PROOF_SIGNER_KEY`, `EEZ_L2_SYSTEM_KEY`, `EEZ_DEPLOYMENTS_FILE`, `EEZ_GENESIS_OUT`. |
+| Out | Exactly one files artifact named `eez-deployments`, with `deployments.env` and `l2-genesis.json` at its root. |
+
+Point the step at an image and command of your own:
+
+```yaml
+eez:
+  deploy_image: ghcr.io/your-org/your-deploy:latest
+  deploy_cmd: "mkdir -p /out && bash /repo/your-deploy.sh"
+```
+
+The command deploys whatever it likes on the L1 named by `EEZ_L1_RPC_URL` — the
+protocol contracts plus your own — and must write `deployments.env` and
+`l2-genesis.json` to the paths given by `EEZ_DEPLOYMENTS_FILE` and
+`EEZ_GENESIS_OUT`. `deployments.env` is sourced by the node and the proof
+signer, so the protocol bindings it usually carries must still be there; your
+own addresses ride alongside them and reach every workload script for free.
+
+To skip deployment entirely and start against artifacts you already have, upload
+them into the enclave and name the artifact instead:
+
+```bash
+kurtosis files upload --name my-deployments "$KURTOSIS_ENCLAVE" ./out
+```
+
+```yaml
+eez:
+  deployments_artifact: "my-deployments"
+```
+
+`deploy_image` and `deploy_cmd` are ignored when `deployments_artifact` is set.
+
 ## Customize the network
 
 ### Arguments file
