@@ -1,5 +1,21 @@
 # Kurtosis local network: canonical L1, builder stack, and eez-node.
 #
+# ── Package API (frozen) ─────────────────────────────────────────────────────
+# The supported surface of this package is `run(plan, args)` plus the `eez`
+# args key set in EEZ_ARG_KEYS below. Both are stable: a consuming repository
+# may depend on them, an unrecognised `eez` key is rejected rather than
+# silently ignored, and adding a key is a deliberate API change.
+#
+# Remote consumption:
+#
+#     kurtosis run github.com/inertialabsxyz/eez-rollup0/testing/kurtosis \
+#         '{"eez": {...}}'
+#
+# A remote run evaluates this file directly and never runs `start.sh`, so it
+# builds nothing. Every image named in the `eez` keys must already be published
+# to a registry the enclave can pull from; the `:dev` defaults below exist only
+# for a local `start.sh` run, which builds them first.
+#
 # ── External deployment bundle ───────────────────────────────────────────────
 # The `eez-deployments` step is the seam for a consuming repository's own
 # contracts. Its contract is fixed:
@@ -31,6 +47,37 @@ BUILDER_FLASHBOTS_RPC_PORT = 8645
 PROOF_SIGNER_GRPC_PORT = 50061
 L2_CHAIN_ID = "6290"
 
+# The frozen `eez` args key set (see the API note above).
+EEZ_ARG_KEYS = [
+    # external deployment seam
+    "deploy_image",
+    "deploy_cmd",
+    "deployments_artifact",
+    # service images
+    "eez_node_image",
+    "proof_signer_image",
+    "follower_image",
+    # private-network keys
+    "poster_key",
+    "proof_signer_key",
+    "l2_system_key",
+    # topology, timing, and logging
+    "builder_rpc_url",
+    "l1_block_time_ms",
+    "l2_block_time_ms",
+    "proof_time_ms",
+    "submission_slack_ms",
+    "max_speculative_depth",
+    "fee_recipient",
+    "proof_signer_rust_log",
+    # explorers
+    "enable_explorers",
+    "blockscout_image",
+    "blockscout_frontend_image",
+    "blockscout_postgres_image",
+    "blockscout_verifier_image",
+]
+
 # The environment the deployment step is given — these six and nothing else.
 DEPLOY_ENV_KEYS = [
     "EEZ_L1_RPC_URL",
@@ -54,9 +101,24 @@ DEFAULT_DEPLOY_CMD = (
 )
 
 
+def _reject_unknown_eez_keys(eez):
+    unknown = []
+    for key in eez.keys():
+        if key not in EEZ_ARG_KEYS:
+            unknown.append(key)
+    if len(unknown) > 0:
+        fail(
+            "unsupported eez args key(s): {}. ".format(", ".join(sorted(unknown)))
+            + "This package's API is run(plan, args) with the eez keys: {}".format(
+                ", ".join(sorted(EEZ_ARG_KEYS))
+            )
+        )
+
+
 def run(plan, args):
     eth_args = args["ethereum_package"]
     eez = args.get("eez", {})
+    _reject_unknown_eez_keys(eez)
     enable_explorers = eez.get("enable_explorers", False)
 
     poster_key = eez.get("poster_key", "")

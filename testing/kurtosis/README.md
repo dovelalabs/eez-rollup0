@@ -423,6 +423,28 @@ network up, deploy its own contracts into the enclave, and drive its own
 transaction types through the workload harness, without this repository knowing
 anything about it.
 
+### The package API
+
+The supported surface is `run(plan, args)` and the `eez` args keys listed in
+`EEZ_ARG_KEYS` at the top of `main.star`. Both are frozen: an unrecognised `eez`
+key is rejected with a message naming the supported set, rather than silently
+ignored, so a typo or a removed key fails at once instead of producing a network
+that quietly ignores half of its configuration. Adding a key is an API change.
+
+Run it remotely by its package name:
+
+```bash
+kurtosis run github.com/inertialabsxyz/eez-rollup0/testing/kurtosis \
+  --enclave "$KURTOSIS_ENCLAVE" --args-file /path/to/your-args.yaml
+```
+
+A remote run evaluates `main.star` directly and **never runs `start.sh`**, so it
+builds no images. Every image named in the `eez` keys — `eez_node_image`,
+`proof_signer_image`, `deploy_image`, `follower_image`, and the Blockscout
+images — must already be published to a registry the enclave can pull from, or
+present in the local Docker daemon. The `:dev` defaults exist only for a local
+`start.sh` run, which builds them first.
+
 ### Deploy your own contracts
 
 The `eez-deployments` step is the seam for a consuming repository's contracts.
