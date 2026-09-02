@@ -390,6 +390,8 @@ locations with `EEZ_NODE_LOG` and `EEZ_PROOF_SIGNER_LOG`.
 
 Useful workload controls include:
 
+- `EEZ_WAVE_OPS`: the ops each wave fires, overriding the mode's built-in list.
+  See "Run your own operations" below.
 - `EEZ_WAVE_COUNT`: number of waves; the script default is three.
 - `EEZ_WAVE_GAP_SECS`: delay between waves; the default is 20 seconds.
 - `EEZ_FILLER_PER_GAP`: pure L2 transactions between `mixed-pure` waves; the
@@ -483,6 +485,62 @@ eez:
 ```
 
 `deploy_image` and `deploy_cmd` are ignored when `deployments_artifact` is set.
+
+### Run your own operations
+
+`EEZ_WAVE_OPS` replaces the op list a wave fires. Ops are comma-separated and
+run in order. A built-in op is `<side>:<kind>`; an external op is
+`ext:<command>`, where `<command>` is run by the harness and prints the
+transaction it wants sent:
+
+```bash
+EEZ_WAVE_OPS="in:set,ext:./ops/place.sh,ext:./ops/cancel.sh" \
+  bash testing/kurtosis/scripts/cross-chain-wave.sh
+```
+
+The harness runs the command with the wave number as its last argument and the
+enclave in its environment:
+
+```text
+EEZ_WAVE_NUMBER            this wave, counting from 1
+EEZ_WAVE_TOTAL             how many waves the run fires
+EEZ_WAVE_L1_RPC            canonical L1 RPC
+EEZ_WAVE_L2_RPC            L2 RPC
+EEZ_WAVE_L1_FRONT          L1 cross-chain front (inbound)
+EEZ_WAVE_L2_FRONT          L2 cross-chain front (outbound)
+EEZ_WAVE_L1_CHAIN_ID       L1 chain id
+EEZ_WAVE_L2_CHAIN_ID       L2 chain id
+EEZ_WAVE_L1_GAS_PRICE      max fee the harness would use on L1, in wei
+EEZ_WAVE_L2_GAS_PRICE      max fee the harness would use on L2, in wei
+EEZ_WAVE_PRIORITY_GAS_PRICE  priority fee, in wei
+```
+
+Everything in the enclave's `deployments.env` is exported too, so an op reads
+its own contract addresses from there.
+
+The command prints either a bare raw signed transaction, or a block of
+`key=value` lines:
+
+```text
+raw=0x02f8...      required — the signed transaction to submit
+side=in|out|l1|l2  where to submit it; default "out"
+kind=<label>       recorded in the transaction metadata and the per-kind tally;
+                   default "ext". The built-in kinds are reserved.
+arg=<label>        free-form value recorded alongside it; default empty
+```
+
+`in` and `out` submit to the L1 and L2 cross-chain fronts; `l1` and `l2` submit
+to the ordinary mempools. An op with nothing to send this wave prints nothing
+and is skipped without being counted; any other output stops the run.
+
+External ops sign with their own keys and so keep their own nonces. They are
+counted, waited for, and reported exactly like the built-ins, and the harness's
+hit-rate and bundle-drop accounting is unchanged by them. The setup a built-in
+op needs — the `Value` targets, their cross-chain proxies, and the wrappers — is
+skipped when the op list contains no built-in op for that side, so a list of
+only external ops starts a wave immediately.
+
+`scripts/example-ext-op.sh` is a working reference op.
 
 ## Customize the network
 
@@ -592,5 +650,7 @@ Kurtosis assigns different host ports automatically. Remember that
 - `scripts/verify-eezl2-deployment.sh`: live EEZL2 deployment verification.
 - `scripts/verify-eezl2-blockscout.sh`: L2 Blockscout source verification for
   the genesis-installed EEZL2 contract.
-- `scripts/cross-chain-wave.sh`: individual cross-chain workload modes.
+- `scripts/cross-chain-wave.sh`: individual cross-chain workload modes and the
+  `EEZ_WAVE_OPS` dispatch.
+- `scripts/example-ext-op.sh`: reference external wave op.
 - `scripts/verify-cross-chain-waves.sh`: complete workload suite.

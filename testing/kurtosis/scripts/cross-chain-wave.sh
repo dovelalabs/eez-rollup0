@@ -12,10 +12,131 @@
 #   outbound → L2 front  ($L2F, enclave port l2-xchain)  (held Outbound, effect on L1)
 # Pure-L2 txs go to the normal L2 RPC mempool ($L2).
 #
+# OPS (EEZ_WAVE_OPS, default: the mode's built-in list)
+#   Each wave fires the ops named in EEZ_WAVE_OPS, in order, separated by
+#   commas. An op is either built in — "<side>:<kind>", one of
+#       in:set  in:noret  in:dep  in:wrap  out:set  out:noret  out:wd  out:wrap
+#   — or external: "ext:<command>", where <command> is run by this harness and
+#   prints the transaction it wants sent. External ops are registered in
+#   TX_META and counted in the tallies exactly like the built-ins, and the
+#   hit-rate and bundle-drop accounting below is unchanged by them.
+#
+#   Setup that only a built-in op needs (the Value targets, their cross-chain
+#   proxies, and the wrappers) is skipped when the op list contains no built-in
+#   op for that side, so a consumer can run its own ops alone:
+#
+#       EEZ_WAVE_OPS="ext:./place.sh,ext:./cancel.sh" ./cross-chain-wave.sh
+#
 # Requires cast, forge, jq, curl, kurtosis, and openssl.
 
 set -euo pipefail
 export FOUNDRY_DISABLE_NIGHTLY_WARNING=1
+
+# ── Op dispatch (EEZ_WAVE_OPS) ────────────────────────────────────────
+# The built-in workload, as an op list per mode. Order matters: the wrapper
+# runs LAST on each side so its value is the expected final Value.value().
+DEFAULT_OPS_IN="in:set,in:noret,in:dep,in:wrap"
+DEFAULT_OPS_OUT="out:set,out:noret,out:wd,out:wrap"
+
+# wave_ops <mode> → one op spec per line, honouring EEZ_WAVE_OPS.
+# Specs are comma-separated; surrounding whitespace is trimmed. An external
+# op's command may contain spaces (its own arguments) but not a comma.
+wave_ops() {
+    local mode="$1" list="${EEZ_WAVE_OPS:-}" spec
+    if [[ -z "$list" ]]; then
+        case "$mode" in
+            inbound)          list="$DEFAULT_OPS_IN" ;;
+            outbound)         list="$DEFAULT_OPS_OUT" ;;
+            mixed|mixed-pure) list="$DEFAULT_OPS_IN,$DEFAULT_OPS_OUT" ;;
+            *) echo "cross-chain wave: unknown mode '$mode'" >&2; return 1 ;;
+        esac
+    fi
+    while IFS= read -r spec; do
+        spec="${spec#"${spec%%[![:space:]]*}"}"
+        spec="${spec%"${spec##*[![:space:]]}"}"
+        [[ -n "$spec" ]] && printf '%s\n' "$spec"
+    done < <(printf '%s\n' "$list" | tr ',' '\n')
+    return 0
+}
+
+# wave_arg_for <op> <wave> → a built-in op's argument for this wave. External
+# and revert ops take none; they are handed the wave number instead.
+wave_arg_for() {
+    case "$1" in
+        in:set)    echo $((100 + $2)) ;;
+        in:noret)  echo $((200 + $2)) ;;
+        in:wrap)   echo $((300 + $2)) ;;
+        in:dep)    echo $(($2 * 10000000000000)) ;;   # w * 1e13 wei
+        out:set)   echo $((400 + $2)) ;;
+        out:noret) echo $((500 + $2)) ;;
+        out:wrap)  echo $((600 + $2)) ;;
+        out:wd)    echo $(($2 * 5000000000000)) ;;    # w * 5e12 wei
+        *)         echo "" ;;
+    esac
+}
+
+# ── External op protocol (ext:) ───────────────────────────────────────
+# The harness runs the consumer's command with the enclave endpoints in the
+# environment (the EEZ_WAVE_* variables set by run_ext_op, plus everything in
+# the enclave's deployments.env) and the wave number as $1. The command prints
+# on stdout either a bare raw signed transaction
+#
+#     0x02f8...
+#
+# or a block of key=value lines:
+#
+#     raw=0x02f8...      required — the signed transaction to submit
+#     side=in|out|l1|l2  where to submit it; default "out"
+#     kind=<label>       recorded in TX_META and the per-kind tally; default
+#                        "ext". The built-in kinds are reserved.
+#     arg=<label>        free-form value recorded in TX_META; default empty
+#
+# side: in → the L1 front (held Inbound)    l1 → the L1 mempool
+#       out → the L2 front (held Outbound)  l2 → the L2 mempool
+#
+# Empty stdout means "nothing to send this wave": the op is skipped and not
+# counted. Anything else is a harness failure and stops the run. An external
+# op signs with its own keys and so owns its own nonces.
+RESERVED_OP_KINDS="set noret wrap dep wd rev"
+
+# ext_op_parse <stdout> → "raw|side|kind|arg", or nothing if the op declined.
+ext_op_parse() {
+    local out="$1" line key value reserved raw="" side="out" kind="ext" arg=""
+    out="${out%"${out##*[![:space:]]}"}"
+    [[ -n "$out" ]] || return 0
+    if [[ "$out" =~ ^0x[0-9a-fA-F]+$ ]]; then
+        raw="$out"
+    else
+        while IFS= read -r line; do
+            [[ -n "${line//[[:space:]]/}" ]] || continue
+            key="${line%%=*}"; value="${line#*=}"
+            case "$key" in
+                raw)  raw="$value" ;;
+                side) side="$value" ;;
+                kind) kind="$value" ;;
+                arg)  arg="$value" ;;
+                *) echo "external op: unknown output key '$key'" >&2; return 1 ;;
+            esac
+        done <<<"$out"
+    fi
+    [[ "$raw" =~ ^0x[0-9a-fA-F]+$ ]] \
+        || { echo "external op: no raw signed transaction (raw='$raw')" >&2; return 1; }
+    case "$side" in in|out|l1|l2) ;;
+        *) echo "external op: unknown side '$side'" >&2; return 1 ;;
+    esac
+    for reserved in $RESERVED_OP_KINDS; do
+        [[ "$kind" != "$reserved" ]] \
+            || { echo "external op: kind '$kind' is reserved for built-in ops" >&2; return 1; }
+    done
+    [[ "$kind" != *"|"* && "$arg" != *"|"* ]] \
+        || { echo "external op: kind and arg may not contain '|'" >&2; return 1; }
+    printf '%s|%s|%s|%s\n' "$raw" "$side" "$kind" "$arg"
+}
+
+# Everything above is pure, so sourcing this script yields the op helpers
+# without touching an enclave — scripts/verify-harness-hooks.sh relies on it.
+# Everything below needs a running enclave.
+[[ "${BASH_SOURCE[0]}" == "${0}" ]] || return 0
 
 K="$(cd "$(dirname "$0")/.." && pwd)"
 REPO="$(cd "$K/../.." && pwd)"
@@ -25,6 +146,22 @@ mkdir -p "$LOG_DIR"
 
 MODE="${EEZ_WAVE_MODE:-mixed}"
 WAVES="${EEZ_WAVE_COUNT:-3}"
+
+OPS=()
+while IFS= read -r op; do OPS+=("$op"); done < <(wave_ops "$MODE")
+(( ${#OPS[@]} )) \
+    || { echo "cross-chain wave: no ops for mode='$MODE' EEZ_WAVE_OPS='${EEZ_WAVE_OPS:-}'"; exit 1; }
+# Which built-in sides are in play. An ext: op declares its own side at run
+# time, so it contributes to neither and needs none of their setup.
+HAS_IN=0; HAS_OUT=0
+for op in "${OPS[@]}"; do
+    case "$op" in
+        in:*)  HAS_IN=1 ;;
+        out:*) HAS_OUT=1 ;;
+        ext:*) ;;
+        *) echo "cross-chain wave: bad op '$op' in EEZ_WAVE_OPS"; exit 1 ;;
+    esac
+done
 
 for t in cast forge jq curl kurtosis openssl; do command -v "$t" >/dev/null || { echo "$t not in PATH"; exit 1; }; done
 
@@ -175,15 +312,17 @@ forge_deploy() { # <rpc> <key> <script:contract> <sig> <args...>  → echoes for
 }
 grab() { grep -oE "$1=0x[0-9a-fA-F]{40}" | head -1 | cut -d= -f2; }
 
-# ── Deploy L2 targets (Value + ValueNoRet) ───────────────────────────
-echo "==> deploying L2 targets (Value, ValueNoRet)"
-L2_VALUE=$(forge_deploy "$L2" "$HH_KEY_2" DeployValueL2.s.sol:DeployValueL2 'run(uint256)' 0 | grab EEZ_VALUE_ADDRESS)
-L2_VALUE_NORET=$(forge_deploy "$L2" "$HH_KEY_2" DeployValueNoRetL2.s.sol:DeployValueNoRetL2 'run(uint256)' 0 | grab EEZ_VALUE_NORET_ADDRESS)
-[[ -n "$L2_VALUE" && -n "$L2_VALUE_NORET" ]] || { echo "L2 target deploy failed"; exit 1; }
-echo "    L2 Value=$L2_VALUE  ValueNoRet=$L2_VALUE_NORET"
+# ── Deploy L2 targets (Value + ValueNoRet), inbound built-ins only ───
+if (( HAS_IN )); then
+    echo "==> deploying L2 targets (Value, ValueNoRet)"
+    L2_VALUE=$(forge_deploy "$L2" "$HH_KEY_2" DeployValueL2.s.sol:DeployValueL2 'run(uint256)' 0 | grab EEZ_VALUE_ADDRESS)
+    L2_VALUE_NORET=$(forge_deploy "$L2" "$HH_KEY_2" DeployValueNoRetL2.s.sol:DeployValueNoRetL2 'run(uint256)' 0 | grab EEZ_VALUE_NORET_ADDRESS)
+    [[ -n "$L2_VALUE" && -n "$L2_VALUE_NORET" ]] || { echo "L2 target deploy failed"; exit 1; }
+    echo "    L2 Value=$L2_VALUE  ValueNoRet=$L2_VALUE_NORET"
+fi
 
 # ── Deploy L1 outbound targets (Value + ValueNoRet on L1) ────────────
-if [[ "$MODE" == outbound || "$MODE" == mixed || "$MODE" == mixed-pure ]]; then
+if (( HAS_OUT )); then
     echo "==> deploying L1 outbound targets (Value, ValueNoRet on L1)"
     L1_VALUE=$(forge_deploy "$L1" "$L1_SETUP_KEY" DeployValueL2.s.sol:DeployValueL2 'run(uint256)' 0 | grab EEZ_VALUE_ADDRESS)
     L1_VALUE_NORET=$(forge_deploy "$L1" "$L1_SETUP_KEY" DeployValueNoRetL2.s.sol:DeployValueNoRetL2 'run(uint256)' 0 | grab EEZ_VALUE_NORET_ADDRESS)
@@ -221,8 +360,8 @@ create_l2_proxy() { # <target_on_L1> → proxy addr
     echo "$p"
 }
 
-echo "==> creating cross-chain proxies for the active mode"
-if [[ "$MODE" == inbound || "$MODE" == mixed || "$MODE" == mixed-pure ]]; then
+echo "==> creating cross-chain proxies for the built-in ops in play"
+if (( HAS_IN )); then
     IN_VALUE_PROXY=$(create_l1_proxy "$L2_VALUE")
     IN_NORET_PROXY=$(create_l1_proxy "$L2_VALUE_NORET")
     IN_DEP_PROXY=$(create_l1_proxy "$L2_DEP_RECIPIENT")
@@ -233,7 +372,7 @@ if [[ "$MODE" == inbound || "$MODE" == mixed || "$MODE" == mixed-pure ]]; then
     IN_WRAPPER=$(forge_deploy "$L1" "$L1_SETUP_KEY" DeploySetterWrapperL1.s.sol:DeploySetterWrapperL1 'run(address)' "$IN_VALUE_PROXY" | grab EEZ_SETTER_WRAPPER)
     echo "    inbound wrapper (L1) = $IN_WRAPPER"
 fi
-if [[ "$MODE" == outbound || "$MODE" == mixed || "$MODE" == mixed-pure ]]; then
+if (( HAS_OUT )); then
     OUT_VALUE_PROXY=$(create_l2_proxy "$L1_VALUE")
     OUT_NORET_PROXY=$(create_l2_proxy "$L1_VALUE_NORET")
     OUT_WD_PROXY=$(create_l2_proxy "$L1_WD_RECIPIENT")
@@ -335,25 +474,32 @@ send_front() {
     return 1
 }
 
+# send_raw <rpc_url> <raw_tx> — eth_sendRawTransaction to an ordinary mempool,
+# for the l1:/l2: sides an external op can ask for. Fails loud like send_front.
+send_raw() {
+    local resp rc
+    resp=$(curl -sS --max-time 10 -X POST "$1" -H 'Content-Type: application/json' \
+        -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_sendRawTransaction\",\"params\":[\"$2\"],\"id\":1}" 2>/dev/null); rc=$?
+    (( rc == 0 )) && [[ -n "$resp" ]] \
+        || { echo "    ✗ submit failed (curl rc=$rc, ${#resp} byte body)" >&2; return 1; }
+    grep -q '"error"' <<<"$resp" && { echo "    ✗ RPC rejected tx: $resp" >&2; return 1; }
+    return 0
+}
+
 run_waves() {
-    local do_in=0 do_out=0 do_pure=0
-    case "$MODE" in
-        inbound)    do_in=1 ;;
-        outbound)   do_out=1 ;;
-        mixed)      do_in=1; do_out=1 ;;
-        mixed-pure) do_in=1; do_out=1; do_pure=1 ;;
-        *) echo "cross-chain wave: unknown mode '$MODE'"; exit 1 ;;
-    esac
+    local do_pure=0
+    [[ "$MODE" != mixed-pure ]] || do_pure=1
 
     # ── Baselines (deltas asserted at the end) ───────────────────────
     local DEP_BEFORE=0 WD_BEFORE=0
-    (( do_in ))  && DEP_BEFORE=$(retry cast balance "$L2_DEP_RECIPIENT" --rpc-url "$L2")
-    (( do_out )) && WD_BEFORE=$(retry cast balance "$L1_WD_RECIPIENT" --rpc-url "$L1")
+    (( HAS_IN ))  && DEP_BEFORE=$(retry cast balance "$L2_DEP_RECIPIENT" --rpc-url "$L2")
+    (( HAS_OUT )) && WD_BEFORE=$(retry cast balance "$L1_WD_RECIPIENT" --rpc-url "$L1")
 
     # ── Local nonce chains (see header) ──────────────────────────────
-    local IN_NONCE OUT_NONCE PURE_NONCE PURE_ADDR
-    (( do_in ))  && IN_NONCE=$(retry cast nonce "$HH_ADDR_IN" --rpc-url "$L1")
-    (( do_out )) && OUT_NONCE=$(retry cast nonce "$HH_ADDR_OUT" --rpc-url "$L2")
+    # External ops sign with their own keys, so they keep their own nonces.
+    local IN_NONCE=0 OUT_NONCE=0 PURE_NONCE PURE_ADDR
+    (( HAS_IN ))  && IN_NONCE=$(retry cast nonce "$HH_ADDR_IN" --rpc-url "$L1")
+    (( HAS_OUT )) && OUT_NONCE=$(retry cast nonce "$HH_ADDR_OUT" --rpc-url "$L2")
     if (( do_pure )); then
         PURE_ADDR=$(cast wallet address --private-key "$HH_KEY_PURE")
         PURE_NONCE=$(retry cast nonce "$PURE_ADDR" --rpc-url "$L2")
@@ -364,18 +510,49 @@ run_waves() {
     # side=in|out; kind=set|noret|wrap|dep|wd.
     local TX_META=()
     local IN_HASHES=() OUT_HASHES=()
+    local EXT_L1_HASHES=() EXT_L2_HASHES=()
     local REV_IN_HASHES=() REV_OUT_HASHES=()
     local REV_IN_NONCE=0 REV_OUT_NONCE=0
 
-    # mk_and_send <side> <kind> <arg>
-    #   in  set/noret/wrap/dep → L1-signed tx via the L1 front
-    #   out set/noret/wrap/wd  → L2-signed tx via the L2 front
+    # run_ext_op <command> <wave> → "raw|side|kind|arg", empty if it declined.
+    # The command's own arguments are word-split out of <command>; the wave
+    # number is appended as its last argument.
+    run_ext_op() {
+        local cmd="$1" w="$2" out rc
+        local -a argv=()
+        read -r -a argv <<<"$cmd"
+        (( ${#argv[@]} )) || { echo "    ✗ empty external op command" >&2; return 1; }
+        out=$(
+            EEZ_WAVE_NUMBER="$w" \
+            EEZ_WAVE_TOTAL="$WAVES" \
+            EEZ_WAVE_L1_RPC="$L1" \
+            EEZ_WAVE_L2_RPC="$L2" \
+            EEZ_WAVE_L1_FRONT="$L1F" \
+            EEZ_WAVE_L2_FRONT="$L2F" \
+            EEZ_WAVE_L1_CHAIN_ID="$L1_CHAIN_ID" \
+            EEZ_WAVE_L2_CHAIN_ID="$L2_CHAIN_ID" \
+            EEZ_WAVE_L1_GAS_PRICE="$(gas_price_for "$L1")" \
+            EEZ_WAVE_L2_GAS_PRICE="$(gas_price_for "$L2")" \
+            EEZ_WAVE_PRIORITY_GAS_PRICE="$PRIORITY_GAS_PRICE" \
+            "${argv[@]}" "$w"
+        ); rc=$?
+        (( rc == 0 )) || { echo "    ✗ external op exited $rc: $cmd" >&2; return 1; }
+        ext_op_parse "$out"
+    }
+
+    # mk_and_send <op> <wave> — the EEZ_WAVE_OPS dispatch.
+    #   in:set/noret/wrap/dep  → L1-signed tx via the L1 front
+    #   out:set/noret/wrap/wd  → L2-signed tx via the L2 front
+    #   ext:<command>          → the consumer's command decides both
     mk_and_send() {
-        local side="$1" kind="$2" arg="$3" raw="" hash
+        local op="$1" w="$2" arg raw="" hash side kind parsed
         local GP PG
         GP=$(gas_price_for "$L1")
         PG="$PRIORITY_GAS_PRICE"
-        case "$side:$kind" in
+        arg=$(wave_arg_for "$op" "$w")
+        side="${op%%:*}"
+        kind="${op#*:}"
+        case "$op" in
             in:set)   raw=$(cast mktx --chain-id "$L1_CHAIN_ID" --private-key "$HH_KEY_IN" --nonce "$IN_NONCE" \
                         --gas-limit 600000 --gas-price "$GP" --priority-gas-price "$PG" \
                         "$IN_VALUE_PROXY" 'setValue(uint256)' "$arg") ;;
@@ -406,19 +583,31 @@ run_waves() {
             out:rev)  raw=$(cast mktx --chain-id "$L2_CHAIN_ID" --private-key "$HH_KEY_REV_OUT" --nonce "$REV_OUT_NONCE" \
                         --gas-limit 600000 --gas-price "$(gas_price_for "$L2")" --priority-gas-price "$PRIORITY_GAS_PRICE" \
                         "$OUT_VALUE_PROXY" 'noSuchFunction()') ;;
-            *) echo "cross-chain wave: bad op $side:$kind"; exit 1 ;;
+            ext:*)     parsed=$(run_ext_op "${op#ext:}" "$w") || exit 1
+                       [[ -n "$parsed" ]] || { echo "    · $op declined wave $w"; return 0; }
+                       IFS='|' read -r raw side kind arg <<<"$parsed" ;;
+            *) echo "cross-chain wave: bad op $op"; exit 1 ;;
         esac
-        [[ "$raw" =~ ^0x[0-9a-fA-F]+$ ]] || { echo "    ✗ mktx failed ($side:$kind): $raw"; exit 1; }
+        [[ "$raw" =~ ^0x[0-9a-fA-F]+$ ]] || { echo "    ✗ mktx failed ($op): $raw"; exit 1; }
         hash=$(cast keccak "$raw")
-        if [[ "$side" == in ]]; then
-            send_front "$L1F" "$raw" || exit 1
-            if [[ "$kind" == rev ]]; then REV_IN_HASHES+=("$hash"); REV_IN_NONCE=$((REV_IN_NONCE + 1));
-            else IN_HASHES+=("$hash"); IN_NONCE=$((IN_NONCE + 1)); fi
-        else
-            send_front "$L2F" "$raw" || exit 1
-            if [[ "$kind" == rev ]]; then REV_OUT_HASHES+=("$hash"); REV_OUT_NONCE=$((REV_OUT_NONCE + 1));
-            else OUT_HASHES+=("$hash"); OUT_NONCE=$((OUT_NONCE + 1)); fi
-        fi
+        case "$side" in
+            in)
+                send_front "$L1F" "$raw" || exit 1
+                if [[ "$kind" == rev ]]; then REV_IN_HASHES+=("$hash"); REV_IN_NONCE=$((REV_IN_NONCE + 1));
+                else
+                    IN_HASHES+=("$hash")
+                    [[ "$op" == ext:* ]] || IN_NONCE=$((IN_NONCE + 1))
+                fi ;;
+            out)
+                send_front "$L2F" "$raw" || exit 1
+                if [[ "$kind" == rev ]]; then REV_OUT_HASHES+=("$hash"); REV_OUT_NONCE=$((REV_OUT_NONCE + 1));
+                else
+                    OUT_HASHES+=("$hash")
+                    [[ "$op" == ext:* ]] || OUT_NONCE=$((OUT_NONCE + 1))
+                fi ;;
+            l1) send_raw "$L1" "$raw" || exit 1; EXT_L1_HASHES+=("$hash") ;;
+            l2) send_raw "$L2" "$raw" || exit 1; EXT_L2_HASHES+=("$hash") ;;
+        esac
         TX_META+=("$hash|$side|$kind|$arg")
     }
 
@@ -450,30 +639,19 @@ run_waves() {
     echo "==> firing $WAVES wave(s), mode=$MODE"
     for ((w=1; w<=WAVES; w++)); do
         echo "── wave $w/$WAVES"
-        if (( do_in )); then
-            mk_and_send in set   $((100 + w))
-            mk_and_send in noret $((200 + w))
-            mk_and_send in dep   $((w * 10000000000000))          # w * 1e13 wei
-            mk_and_send in wrap  $((300 + w))
-            (( INCLUDE_REVERTS && w == 1 )) && mk_and_send in rev 0
-            IN_WAVE_TARGET="$IN_NONCE"
-            echo "    inbound: 4 ops via L1 front (set/noret/dep/wrap)"
-        fi
-        if (( do_out )); then
-            mk_and_send out set   $((400 + w))
-            mk_and_send out noret $((500 + w))
-            mk_and_send out wd    $((w * 5000000000000))          # w * 5e12 wei
-            mk_and_send out wrap  $((600 + w))
-            (( INCLUDE_REVERTS && w == 1 )) && mk_and_send out rev 0
-            OUT_WAVE_TARGET="$OUT_NONCE"
-            echo "    outbound: 4 ops via L2 front (set/noret/wd/wrap)"
-        fi
+        local op
+        for op in "${OPS[@]}"; do mk_and_send "$op" "$w"; done
+        (( INCLUDE_REVERTS && w == 1 && HAS_IN ))  && mk_and_send in:rev "$w"
+        (( INCLUDE_REVERTS && w == 1 && HAS_OUT )) && mk_and_send out:rev "$w"
+        (( HAS_IN ))  && IN_WAVE_TARGET="$IN_NONCE"
+        (( HAS_OUT )) && OUT_WAVE_TARGET="$OUT_NONCE"
+        echo "    ops: ${OPS[*]}"
         (( do_pure )) && { submit_pure_filler "$FILLER_PER_GAP"; echo "    pure: $FILLER_PER_GAP L2 filler txs"; }
         if (( w < WAVES )); then
-            if (( do_in )); then
+            if (( HAS_IN )); then
                 wait_nonce_at_least "$L1" "$HH_ADDR_IN" "$IN_WAVE_TARGET" "inbound sender" || exit 1
             fi
-            if (( do_out )); then
+            if (( HAS_OUT )); then
                 wait_nonce_at_least "$L2" "$HH_ADDR_OUT" "$OUT_WAVE_TARGET" "outbound sender" || exit 1
             fi
         fi
@@ -482,7 +660,7 @@ run_waves() {
 
     # ── Wait for inclusion ─────────────────────────────────────────────
     # inbound → L1 receipts, outbound → L2 receipts.
-    local total=$(( ${#IN_HASHES[@]} + ${#OUT_HASHES[@]} ))
+    local total=$(( ${#IN_HASHES[@]} + ${#OUT_HASHES[@]} + ${#EXT_L1_HASHES[@]} + ${#EXT_L2_HASHES[@]} ))
     echo
     echo "==> waiting up to ${RECEIPT_WAIT_SECS}s for $total cross-chain inclusions"
     local wait_end=$(( SECONDS + RECEIPT_WAIT_SECS )) confirmed evicted h last_line=""
@@ -490,6 +668,8 @@ run_waves() {
         confirmed=0
         for h in "${IN_HASHES[@]:-}";  do [[ -n "$h" && "$(receipt_status "$h" "$L1")" == "1" ]] && confirmed=$((confirmed+1)); done
         for h in "${OUT_HASHES[@]:-}"; do [[ -n "$h" && "$(receipt_status "$h" "$L2")" == "1" ]] && confirmed=$((confirmed+1)); done
+        for h in "${EXT_L1_HASHES[@]:-}"; do [[ -n "$h" && "$(receipt_status "$h" "$L1")" == "1" ]] && confirmed=$((confirmed+1)); done
+        for h in "${EXT_L2_HASHES[@]:-}"; do [[ -n "$h" && "$(receipt_status "$h" "$L2")" == "1" ]] && confirmed=$((confirmed+1)); done
         refresh_node_log
         evicted=$(grep -c "evicted" "$NODE_LOG" 2>/dev/null || true); evicted=${evicted:-0}
         local line="    progress: $confirmed/$total confirmed, $evicted eviction log line(s) (elapsed ${SECONDS}s)"
@@ -508,30 +688,39 @@ run_waves() {
     local m mh mside mkind marg
     local IN_LAST_VALUE="" IN_LAST_NORET="" IN_DEP_SUM=0
     local OUT_LAST_VALUE="" OUT_LAST_NORET="" OUT_WD_SUM=0
+    local -A KIND_COUNT=()
     for m in "${TX_META[@]:-}"; do
         [[ -n "$m" ]] || continue
         IFS='|' read -r mh mside mkind marg <<<"$m"
-        if [[ "$mside" == in ]]; then
+        if [[ "$mside" == in || "$mside" == l1 ]]; then
             [[ "$(receipt_status "$mh" "$L1")" == "1" ]] || continue
-            case "$mkind" in
-                set|wrap) IN_LAST_VALUE="$marg" ;;
-                noret)    IN_LAST_NORET="$marg" ;;
-                dep)      IN_DEP_SUM=$((IN_DEP_SUM + marg)) ;;
-            esac
         else
             [[ "$(receipt_status "$mh" "$L2")" == "1" ]] || continue
-            case "$mkind" in
-                set|wrap) OUT_LAST_VALUE="$marg" ;;
-                noret)    OUT_LAST_NORET="$marg" ;;
-                wd)       OUT_WD_SUM=$((OUT_WD_SUM + marg)) ;;
-            esac
         fi
+        KIND_COUNT["$mside:$mkind"]=$(( ${KIND_COUNT["$mside:$mkind"]:-0} + 1 ))
+        case "$mside:$mkind" in
+            in:set|in:wrap)   IN_LAST_VALUE="$marg" ;;
+            in:noret)         IN_LAST_NORET="$marg" ;;
+            in:dep)           IN_DEP_SUM=$((IN_DEP_SUM + marg)) ;;
+            out:set|out:wrap) OUT_LAST_VALUE="$marg" ;;
+            out:noret)        OUT_LAST_NORET="$marg" ;;
+            out:wd)           OUT_WD_SUM=$((OUT_WD_SUM + marg)) ;;
+        esac
     done
 
     # ── Assertions ──────────────────────────────────────────────────────
     echo
     echo "==> assertions"
     local ok_all=1 signer_ok=0 attested_hash=""
+
+    # Per-kind confirmed tally. An ext: op appears here under its own kind.
+    local tally="" kindkey
+    if (( ${#KIND_COUNT[@]} )); then
+        for kindkey in $(printf '%s\n' "${!KIND_COUNT[@]}" | sort); do
+            tally+="$kindkey=${KIND_COUNT[$kindkey]} "
+        done
+    fi
+    echo "    ℹ ops confirmed by kind: ${tally:-none}"
 
     # The destination call fails, so status=1 would mean a call that reverted
     # on the far side settled as if it had applied.
@@ -562,22 +751,33 @@ run_waves() {
         fi
     }
 
-    if (( do_in )); then
+    # Each convergence check runs only if its op was in the list. Inclusion is
+    # already asserted above, so a non-empty accumulator means the op fired and
+    # confirmed. An external op asserts its own outcome, in its own repository.
+    if (( HAS_IN )); then
         local v n d
-        v=$(retry cast call "$L2_VALUE" 'value()(uint256)' --rpc-url "$L2")
-        n=$(retry cast call "$L2_VALUE_NORET" 'value()(uint256)' --rpc-url "$L2")
+        if [[ -n "$IN_LAST_VALUE" ]]; then
+            v=$(retry cast call "$L2_VALUE" 'value()(uint256)' --rpc-url "$L2")
+            check_eq "inbound setter converged (L2 Value.value)"       "$v" "$IN_LAST_VALUE"
+        fi
+        if [[ -n "$IN_LAST_NORET" ]]; then
+            n=$(retry cast call "$L2_VALUE_NORET" 'value()(uint256)' --rpc-url "$L2")
+            check_eq "inbound noret converged (L2 ValueNoRet.value)"   "$n" "$IN_LAST_NORET"
+        fi
         d=$(retry cast balance "$L2_DEP_RECIPIENT" --rpc-url "$L2")
-        check_eq "inbound setter converged (L2 Value.value)"       "$v" "$IN_LAST_VALUE"
-        check_eq "inbound noret converged (L2 ValueNoRet.value)"   "$n" "$IN_LAST_NORET"
         check_eq "inbound deposits converged (L2 recipient bal)"   "$d" "$((DEP_BEFORE + IN_DEP_SUM))"
     fi
-    if (( do_out )); then
+    if (( HAS_OUT )); then
         local v n d
-        v=$(retry cast call "$L1_VALUE" 'value()(uint256)' --rpc-url "$L1")
-        n=$(retry cast call "$L1_VALUE_NORET" 'value()(uint256)' --rpc-url "$L1")
+        if [[ -n "$OUT_LAST_VALUE" ]]; then
+            v=$(retry cast call "$L1_VALUE" 'value()(uint256)' --rpc-url "$L1")
+            check_eq "outbound setter converged (L1 Value.value)"      "$v" "$OUT_LAST_VALUE"
+        fi
+        if [[ -n "$OUT_LAST_NORET" ]]; then
+            n=$(retry cast call "$L1_VALUE_NORET" 'value()(uint256)' --rpc-url "$L1")
+            check_eq "outbound noret converged (L1 ValueNoRet.value)"  "$n" "$OUT_LAST_NORET"
+        fi
         d=$(retry cast balance "$L1_WD_RECIPIENT" --rpc-url "$L1")
-        check_eq "outbound setter converged (L1 Value.value)"      "$v" "$OUT_LAST_VALUE"
-        check_eq "outbound noret converged (L1 ValueNoRet.value)"  "$n" "$OUT_LAST_NORET"
         check_eq "outbound withdrawals converged (L1 recipient)"   "$d" "$((WD_BEFORE + OUT_WD_SUM))"
     fi
 
