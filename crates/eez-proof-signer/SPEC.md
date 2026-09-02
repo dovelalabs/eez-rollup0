@@ -135,7 +135,6 @@ The CLI value takes precedence.
 | `--max-request-blocks` | `EEZ_PROOF_SIGNER_MAX_REQUEST_BLOCKS` | `512` | Nonzero. |
 | `--max-request-bytes` | `EEZ_PROOF_SIGNER_MAX_REQUEST_BYTES` | `536870912` | Nonzero. |
 | `--max-request-witness-items` | `EEZ_PROOF_SIGNER_MAX_REQUEST_WITNESS_ITEMS` | `1000000` | Nonzero. |
-| `--max-transaction-state-checkpoints` | `EEZ_PROOF_SIGNER_MAX_TRANSACTION_STATE_CHECKPOINTS` | `8` | May be zero. |
 | `--stream-idle-timeout-secs` | `EEZ_PROOF_SIGNER_STREAM_IDLE_TIMEOUT_SECS` | `120` | Nonzero and representable as an `Instant` deadline. |
 | `--request-timeout-secs` | `EEZ_PROOF_SIGNER_REQUEST_TIMEOUT_SECS` | `600` | Nonzero and representable as an `Instant` deadline. |
 
@@ -300,9 +299,9 @@ An absent `system[i + 1]` at block end is treated as `true`. Thus an outbound
 inbound system transaction ends at itself.
 
 The Composer MUST NOT nominate checkpoint positions. The complete plan MUST be
-derived and checked against `max_transaction_state_checkpoints` before earlier
-blocks are replayed. The backend MUST return exactly the requested positions in
-strict order. Preceding blocks MUST return no checkpoints.
+derived before earlier blocks are replayed. The backend MUST return exactly the
+requested positions in strict order. Preceding blocks MUST return no
+checkpoints.
 
 ### 6.3 Stateless replay guarantees
 
@@ -724,13 +723,62 @@ messages SHOULD remain stable and must not expose secrets.
 | `InvalidArgument` | Malformed stream structure; invalid widths or bounds; noncanonical/invalid PostBatch calldata; malformed or trailing DA payload. |
 | `FailedPrecondition` | Rollup identity mismatch; Stateless input rejection; unsupported batch profile; state/effect/inbound/outbound/DA semantic rejection. |
 | `Unavailable` | Another request is active. The same complete request may succeed after the active request releases the slot. |
-| `ResourceExhausted` | A decoding, block, byte, witness-item, or checkpoint limit was exceeded; or block-vector storage could not be reserved. |
+| `ResourceExhausted` | A decoding, block, byte, or witness-item limit was exceeded; or block-vector storage could not be reserved. |
 | `DeadlineExceeded` | Stream idle timeout or absolute request deadline. |
 | `Cancelled` | Cooperative stop after request cancellation. |
 | `Internal` | Backend-success output violates its contract; local invariant failure; impossible public-input computation/cardinality; reconstruction failures attributable to already validated internal evidence; signing failure. |
 
 A malformed candidate that could otherwise disappear from consideration MUST
 be retained and rejected at its authorization gate.
+
+### 14.1 Actionable failed preconditions
+
+A `FailedPrecondition` response MAY carry one protobuf-encoded `ProveFailure`
+in the gRPC status-details field when the validated execution identifies one
+cross-chain candidate that the Composer can safely remove. The status code,
+not the details payload, remains authoritative for retry classification.
+
+`ProveFailure.actionable_failure` has exactly two supported variants:
+
+- `OutboundFailure` identifies the original signed L2 user transaction by its
+  zero-based index in the terminal Sync block and its canonical 32-byte
+  transaction hash. When the preceding synthetic load transaction reverted,
+  the failure still identifies the paired user transaction; rebuilding the
+  Sync block regenerates or removes both halves together.
+- `InboundFailure` identifies the claimed effect by its zero-based index in
+  `PostBatch.entries` and the 32-byte keccak hash of that entry's canonical ABI
+  encoding. The original signed L1 transaction is not present in the proof
+  request, so the Composer MUST resolve it through the request-local
+  entry-to-held-transaction mapping retained during composition.
+
+The signer MUST attach an outbound detail only when validated terminal-block
+execution safely identifies the original user transaction: a reverted
+canonical synthetic load/user pair, or a positioned outbound observation
+failure attributable to the user transaction. It MUST attach an inbound detail
+only for a positioned inbound delivery transaction that reverted. Structural,
+ordering, envelope, claim-only, missing-candidate, extra-observation, DA, and
+state-chain failures MUST remain non-actionable even when their diagnostic
+contains an index. A mismatch between a claimed entry's call hash and an
+execution observation is claim-only in both directions and MUST remain
+non-actionable.
+
+Before changing pool state, the Composer MUST verify both fields against the
+exact rejected request: index and transaction hash for outbound, or index and
+canonical entry hash for inbound. Empty, malformed, unknown, wrong-width, or
+mismatched details MUST be handled as an ordinary non-actionable rejection.
+The Composer MUST NOT retry an unchanged request after an actionable failure.
+It MAY remove the resolved held transaction and its same-sender,
+same-direction nonce suffix, then rebuild and submit a smaller batch within the
+remaining slot budget. This recovery does not authorize bisection or eviction
+for failures that carry no valid typed detail.
+
+The index-and-hash checks bind an actionable detail to the rejected request;
+they do not independently prove that the reported execution failure occurred.
+The Composer therefore trusts its configured prover not to falsely attribute a
+failure. A buggy or compromised prover can cause valid held transactions and
+their nonce suffixes to be evicted, requiring users to resubmit. Authenticating
+the Composer-prover transport prevents response injection but does not remove
+this configured-prover trust.
 
 ## 15. Conformance and change control
 
@@ -743,7 +791,7 @@ A compatible implementation MUST test at least:
 - every stream ordering, identity, and quota boundary;
 - strict chain-document parsing and secret redaction;
 - exact RLP identity/hash binding and backend-output association;
-- checkpoint selection, quota, returned positions, and roots;
+- checkpoint selection, returned positions, and roots;
 - canonical PostBatch decoding and every profile pin;
 - state-chain endpoints, continuity, effect count/order/kind, and checkpoints;
 - inbound outer/inner equality, call hash, rolling hash, value, and canonical
@@ -751,6 +799,8 @@ A compatible implementation MUST test at least:
 - outbound event provenance, canonical encoding, zero-`callGas` hash, L1
   rolling hash, ordering, source, and value;
 - exact DA projection, sidecars, and mixed Sync-block reconstruction;
+- actionable outbound/inbound failure attribution, reference validation, and
+  non-actionable fallback;
 - public-input vectors against the pinned Solidity formula; and
 - raw-digest ECDSA recovery, low-`s`, and `v` encoding.
 
