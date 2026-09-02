@@ -29,3 +29,12 @@ run_check "cross-chain-wave-ext" \
     env EEZ_WAVE_MODE=mixed EEZ_WAVE_COUNT=1 \
         EEZ_WAVE_OPS="in:set,in:noret,in:dep,in:wrap,out:set,out:noret,out:wd,out:wrap,ext:$HERE/example-ext-op.sh" \
     bash "$HERE/cross-chain-wave.sh"
+
+# Sent is not enough: the external op must be registered like a built-in, so it
+# appears in the run's confirmed-by-kind tally under the kind it declared.
+EXT_LOG="$RESULT_DIR/checks/cross-chain-wave-ext.log"
+grep -q "ops confirmed by kind:.*l2:example=1" "$EXT_LOG" || {
+    echo "external op missing from the confirmed-by-kind tally" >&2
+    exit 1
+}
+echo "    ✓ the external op is tallied under its own kind"
