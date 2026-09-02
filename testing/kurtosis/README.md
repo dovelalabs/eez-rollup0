@@ -540,7 +540,12 @@ op needs — the `Value` targets, their cross-chain proxies, and the wrappers �
 skipped when the op list contains no built-in op for that side, so a list of
 only external ops starts a wave immediately.
 
-`scripts/example-ext-op.sh` is a working reference op.
+`scripts/example-ext-op.sh` is a working reference op. Verify the whole seam
+without an enclave:
+
+```bash
+bash testing/kurtosis/scripts/verify-harness-hooks.sh
+```
 
 ## Customize the network
 
@@ -654,3 +659,5 @@ Kurtosis assigns different host ports automatically. Remember that
   `EEZ_WAVE_OPS` dispatch.
 - `scripts/example-ext-op.sh`: reference external wave op.
 - `scripts/verify-cross-chain-waves.sh`: complete workload suite.
+- `scripts/verify-harness-hooks.sh`: hermetic checks over the external-consumer
+  hooks — the deployment seam, the op dispatch, and the package API.
