@@ -436,7 +436,7 @@ that quietly ignores half of its configuration. Adding a key is an API change.
 Run it remotely by its package name:
 
 ```bash
-kurtosis run github.com/inertialabsxyz/eez-rollup0/testing/kurtosis \
+kurtosis run github.com/dovelalabs/eez-rollup0/testing/kurtosis \
   --enclave "$KURTOSIS_ENCLAVE" --args-file /path/to/your-args.yaml
 ```
 

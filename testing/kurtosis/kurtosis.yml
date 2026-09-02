@@ -3,4 +3,4 @@
 # The name must match the package's own remote locator, or a consumer running
 # `kurtosis run github.com/<org>/<repo>/testing/kurtosis` gets a name mismatch
 # and the run fails before any instruction executes.
-name: github.com/inertialabsxyz/eez-rollup0/testing/kurtosis
+name: github.com/dovelalabs/eez-rollup0/testing/kurtosis
