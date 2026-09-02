@@ -1,4 +1,34 @@
 # Kurtosis local network: canonical L1, builder stack, and eez-node.
+#
+# ── Package API (frozen) ─────────────────────────────────────────────────────
+# The supported surface of this package is `run(plan, args)` plus the `eez`
+# args key set in EEZ_ARG_KEYS below. Both are stable: a consuming repository
+# may depend on them, an unrecognised `eez` key is rejected rather than
+# silently ignored, and adding a key is a deliberate API change.
+#
+# Remote consumption:
+#
+#     kurtosis run github.com/dovelalabs/eez-rollup0/testing/kurtosis \
+#         '{"eez": {...}}'
+#
+# A remote run evaluates this file directly and never runs `start.sh`, so it
+# builds nothing. Every image named in the `eez` keys must already be published
+# to a registry the enclave can pull from; the `:dev` defaults below exist only
+# for a local `start.sh` run, which builds them first.
+#
+# ── External deployment bundle ───────────────────────────────────────────────
+# The `eez-deployments` step is the seam for a consuming repository's own
+# contracts. Its contract is fixed:
+#
+#   in    exactly the six environment variables in DEPLOY_ENV_KEYS, set on an
+#         `eez.deploy_image` container running `eez.deploy_cmd`
+#   out   exactly one files artifact named `eez-deployments`, holding
+#         `deployments.env` and `l2-genesis.json` at its root
+#
+# Set `eez.deploy_image` + `eez.deploy_cmd` to deploy arbitrary contracts into
+# the enclave; the framework never learns what they are. Set
+# `eez.deployments_artifact` to the name of an artifact that already satisfies
+# the output contract to skip deployment entirely.
 
 ethereum_package = import_module(
     "github.com/ethpandaops/ethereum-package/main.star@199620b24ac979c676010c5a68b2893c2bce4f1f"
@@ -17,10 +47,78 @@ BUILDER_FLASHBOTS_RPC_PORT = 8645
 PROOF_SIGNER_GRPC_PORT = 50061
 L2_CHAIN_ID = "6290"
 
+# The frozen `eez` args key set (see the API note above).
+EEZ_ARG_KEYS = [
+    # external deployment seam
+    "deploy_image",
+    "deploy_cmd",
+    "deployments_artifact",
+    # service images
+    "eez_node_image",
+    "proof_signer_image",
+    "follower_image",
+    # private-network keys
+    "poster_key",
+    "proof_signer_key",
+    "l2_system_key",
+    # topology, timing, and logging
+    "builder_rpc_url",
+    "l1_block_time_ms",
+    "l2_block_time_ms",
+    "proof_time_ms",
+    "submission_slack_ms",
+    "max_speculative_depth",
+    "fee_recipient",
+    "proof_signer_rust_log",
+    # explorers
+    "enable_explorers",
+    "blockscout_image",
+    "blockscout_frontend_image",
+    "blockscout_postgres_image",
+    "blockscout_verifier_image",
+]
+
+# The environment the deployment step is given — these six and nothing else.
+DEPLOY_ENV_KEYS = [
+    "EEZ_L1_RPC_URL",
+    "EEZ_L1_POSTER_KEY",
+    "EEZ_PROOF_SIGNER_KEY",
+    "EEZ_L2_SYSTEM_KEY",
+    "EEZ_DEPLOYMENTS_FILE",
+    "EEZ_GENESIS_OUT",
+]
+
+# The one artifact the deployment step stores, and the name a supplied
+# `eez.deployments_artifact` is expected to carry.
+DEPLOYMENTS_ARTIFACT = "eez-deployments"
+
+# What the bundled protocol deployment runs when no `eez.deploy_cmd` is given.
+# A consumer's command reads DEPLOY_ENV_KEYS and leaves the same two files.
+DEFAULT_DEPLOY_CMD = (
+    "mkdir -p /out"
+    + " && bash /repo/scripts/deploy.sh"
+    + " && cp -R /repo/contracts/broadcast /out/foundry-broadcast"
+)
+
+
+def _reject_unknown_eez_keys(eez):
+    unknown = []
+    for key in eez.keys():
+        if key not in EEZ_ARG_KEYS:
+            unknown.append(key)
+    if len(unknown) > 0:
+        fail(
+            "unsupported eez args key(s): {}. ".format(", ".join(sorted(unknown)))
+            + "This package's API is run(plan, args) with the eez keys: {}".format(
+                ", ".join(sorted(EEZ_ARG_KEYS))
+            )
+        )
+
 
 def run(plan, args):
     eth_args = args["ethereum_package"]
     eez = args.get("eez", {})
+    _reject_unknown_eez_keys(eez)
     enable_explorers = eez.get("enable_explorers", False)
 
     poster_key = eez.get("poster_key", "")
@@ -76,22 +174,35 @@ def run(plan, args):
         store=[StoreSpec(src="/jwt/jwtsecret", name="eez-jwt")],
     )
 
-    # Deploy protocol contracts and emit /out/deployments.env + /out/l2-genesis.json.
-    deploy = plan.run_sh(
-        description="deploy EEZ contracts + generate L2 genesis on the shared L1",
-        image=eez.get("deploy_image", "eez-deploy:dev"),
-        env_vars={
-            "EEZ_L1_RPC_URL": l1_el.rpc_http_url,
-            "EEZ_L1_POSTER_KEY": poster_key,
-            "EEZ_PROOF_SIGNER_KEY": proof_signer_key,
-            "EEZ_L2_SYSTEM_KEY": l2_system_key,
-            "EEZ_DEPLOYMENTS_FILE": "/out/deployments.env",
-            "EEZ_GENESIS_OUT": "/out/l2-genesis.json",
-        },
-        run="mkdir -p /out && bash /repo/scripts/deploy.sh && cp -R /repo/contracts/broadcast /out/foundry-broadcast",
-        store=[StoreSpec(src="/out", name="eez-deployments")],
-        wait="900s",
-    )
+    # The external deployment seam (see the header). Either the consumer hands
+    # in an artifact that already satisfies the output contract, or the step
+    # runs their command in their image with exactly DEPLOY_ENV_KEYS set and
+    # stores what it leaves in /out as the one `eez-deployments` artifact.
+    supplied_artifact = eez.get("deployments_artifact", "")
+    if supplied_artifact != "":
+        deployments = supplied_artifact
+        plan.print(
+            "eez-deployments: using supplied artifact '{}'; deployment skipped".format(
+                supplied_artifact
+            )
+        )
+    else:
+        deploy = plan.run_sh(
+            description="deploy contracts + generate L2 genesis on the shared L1",
+            image=eez.get("deploy_image", "eez-deploy:dev"),
+            env_vars={
+                "EEZ_L1_RPC_URL": l1_el.rpc_http_url,
+                "EEZ_L1_POSTER_KEY": poster_key,
+                "EEZ_PROOF_SIGNER_KEY": proof_signer_key,
+                "EEZ_L2_SYSTEM_KEY": l2_system_key,
+                "EEZ_DEPLOYMENTS_FILE": "/out/deployments.env",
+                "EEZ_GENESIS_OUT": "/out/l2-genesis.json",
+            },
+            run=eez.get("deploy_cmd", DEFAULT_DEPLOY_CMD),
+            store=[StoreSpec(src="/out", name=DEPLOYMENTS_ARTIFACT)],
+            wait="900s",
+        )
+        deployments = deploy.files_artifacts[0]
 
     signer_cmd = " ".join(
         [
@@ -116,7 +227,7 @@ def run(plan, args):
                 ),
             },
             files={
-                "/out": deploy.files_artifacts[0],
+                "/out": deployments,
             },
             env_vars={
                 "EEZ_PROOF_SIGNER_KEY": proof_signer_key,
@@ -204,7 +315,7 @@ def run(plan, args):
                 ),
             },
             files={
-                "/out": deploy.files_artifacts[0],
+                "/out": deployments,
                 "/genesis": "el_cl_genesis_data",
                 "/jwt": jwt.files_artifacts[0],
             },
@@ -288,7 +399,7 @@ def run(plan, args):
         # The Geth adapter understands alloc-based genesis files and uses the
         # debug namespace exposed by the L2 Reth node for internal calls.
         l2_explorer_params["json_rpc_variant"] = "geth"
-        l2_explorer_params["chain_spec_artifact"] = deploy.files_artifacts[0]
+        l2_explorer_params["chain_spec_artifact"] = deployments
         l2_explorer_params["chain_spec_path"] = "/chain-spec/l2-genesis.json"
         blockscout.launch(
             plan=plan,

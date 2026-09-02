@@ -390,6 +390,8 @@ locations with `EEZ_NODE_LOG` and `EEZ_PROOF_SIGNER_LOG`.
 
 Useful workload controls include:
 
+- `EEZ_WAVE_OPS`: the ops each wave fires, overriding the mode's built-in list.
+  See "Run your own operations" below.
 - `EEZ_WAVE_COUNT`: number of waves; the script default is three.
 - `EEZ_WAVE_GAP_SECS`: delay between waves; the default is 20 seconds.
 - `EEZ_FILLER_PER_GAP`: pure L2 transactions between `mixed-pure` waves; the
@@ -415,6 +417,135 @@ already-running local enclave and leaves it running. It executes one `inbound`,
 `outbound`, and `mixed` wave, followed by three `mixed-pure` waves. Per-mode
 output is stored under `$EEZ_CI_RESULT_DIR/checks`. Override the stress count
 with `EEZ_MIXED_PURE_WAVE_COUNT`.
+
+## Consume this package from another repository
+
+This package is a supported dependency. Another repository can bring the whole
+network up, deploy its own contracts into the enclave, and drive its own
+transaction types through the workload harness, without this repository knowing
+anything about it.
+
+### The package API
+
+The supported surface is `run(plan, args)` and the `eez` args keys listed in
+`EEZ_ARG_KEYS` at the top of `main.star`. Both are frozen: an unrecognised `eez`
+key is rejected with a message naming the supported set, rather than silently
+ignored, so a typo or a removed key fails at once instead of producing a network
+that quietly ignores half of its configuration. Adding a key is an API change.
+
+Run it remotely by its package name:
+
+```bash
+kurtosis run github.com/dovelalabs/eez-rollup0/testing/kurtosis \
+  --enclave "$KURTOSIS_ENCLAVE" --args-file /path/to/your-args.yaml
+```
+
+A remote run evaluates `main.star` directly and **never runs `start.sh`**, so it
+builds no images. Every image named in the `eez` keys — `eez_node_image`,
+`proof_signer_image`, `deploy_image`, `follower_image`, and the Blockscout
+images — must already be published to a registry the enclave can pull from, or
+present in the local Docker daemon. The `:dev` defaults exist only for a local
+`start.sh` run, which builds them first.
+
+### Deploy your own contracts
+
+The `eez-deployments` step is the seam for a consuming repository's contracts.
+Its contract is fixed in both directions:
+
+| Direction | Contract |
+| --- | --- |
+| In | Exactly six environment variables on the container: `EEZ_L1_RPC_URL`, `EEZ_L1_POSTER_KEY`, `EEZ_PROOF_SIGNER_KEY`, `EEZ_L2_SYSTEM_KEY`, `EEZ_DEPLOYMENTS_FILE`, `EEZ_GENESIS_OUT`. |
+| Out | Exactly one files artifact named `eez-deployments`, with `deployments.env` and `l2-genesis.json` at its root. |
+
+Point the step at an image and command of your own:
+
+```yaml
+eez:
+  deploy_image: ghcr.io/your-org/your-deploy:latest
+  deploy_cmd: "mkdir -p /out && bash /repo/your-deploy.sh"
+```
+
+The command deploys whatever it likes on the L1 named by `EEZ_L1_RPC_URL` — the
+protocol contracts plus your own — and must write `deployments.env` and
+`l2-genesis.json` to the paths given by `EEZ_DEPLOYMENTS_FILE` and
+`EEZ_GENESIS_OUT`. `deployments.env` is sourced by the node and the proof
+signer, so the protocol bindings it usually carries must still be there; your
+own addresses ride alongside them and reach every workload script for free.
+
+To skip deployment entirely and start against artifacts you already have, upload
+them into the enclave and name the artifact instead:
+
+```bash
+kurtosis files upload --name my-deployments "$KURTOSIS_ENCLAVE" ./out
+```
+
+```yaml
+eez:
+  deployments_artifact: "my-deployments"
+```
+
+`deploy_image` and `deploy_cmd` are ignored when `deployments_artifact` is set.
+
+### Run your own operations
+
+`EEZ_WAVE_OPS` replaces the op list a wave fires. Ops are comma-separated and
+run in order. A built-in op is `<side>:<kind>`; an external op is
+`ext:<command>`, where `<command>` is run by the harness and prints the
+transaction it wants sent:
+
+```bash
+EEZ_WAVE_OPS="in:set,ext:./ops/place.sh,ext:./ops/cancel.sh" \
+  bash testing/kurtosis/scripts/cross-chain-wave.sh
+```
+
+The harness runs the command with the wave number as its last argument and the
+enclave in its environment:
+
+```text
+EEZ_WAVE_NUMBER            this wave, counting from 1
+EEZ_WAVE_TOTAL             how many waves the run fires
+EEZ_WAVE_L1_RPC            canonical L1 RPC
+EEZ_WAVE_L2_RPC            L2 RPC
+EEZ_WAVE_L1_FRONT          L1 cross-chain front (inbound)
+EEZ_WAVE_L2_FRONT          L2 cross-chain front (outbound)
+EEZ_WAVE_L1_CHAIN_ID       L1 chain id
+EEZ_WAVE_L2_CHAIN_ID       L2 chain id
+EEZ_WAVE_L1_GAS_PRICE      max fee the harness would use on L1, in wei
+EEZ_WAVE_L2_GAS_PRICE      max fee the harness would use on L2, in wei
+EEZ_WAVE_PRIORITY_GAS_PRICE  priority fee, in wei
+```
+
+Everything in the enclave's `deployments.env` is exported too, so an op reads
+its own contract addresses from there.
+
+The command prints either a bare raw signed transaction, or a block of
+`key=value` lines:
+
+```text
+raw=0x02f8...      required — the signed transaction to submit
+side=in|out|l1|l2  where to submit it; default "out"
+kind=<label>       recorded in the transaction metadata and the per-kind tally;
+                   default "ext". The built-in kinds are reserved.
+arg=<label>        free-form value recorded alongside it; default empty
+```
+
+`in` and `out` submit to the L1 and L2 cross-chain fronts; `l1` and `l2` submit
+to the ordinary mempools. An op with nothing to send this wave prints nothing
+and is skipped without being counted; any other output stops the run.
+
+External ops sign with their own keys and so keep their own nonces. They are
+counted, waited for, and reported exactly like the built-ins, and the harness's
+hit-rate and bundle-drop accounting is unchanged by them. The setup a built-in
+op needs — the `Value` targets, their cross-chain proxies, and the wrappers — is
+skipped when the op list contains no built-in op for that side, so a list of
+only external ops starts a wave immediately.
+
+`scripts/example-ext-op.sh` is a working reference op. Verify the whole seam
+without an enclave:
+
+```bash
+bash testing/kurtosis/scripts/verify-harness-hooks.sh
+```
 
 ## Customize the network
 
@@ -524,5 +655,9 @@ Kurtosis assigns different host ports automatically. Remember that
 - `scripts/verify-eezl2-deployment.sh`: live EEZL2 deployment verification.
 - `scripts/verify-eezl2-blockscout.sh`: L2 Blockscout source verification for
   the genesis-installed EEZL2 contract.
-- `scripts/cross-chain-wave.sh`: individual cross-chain workload modes.
+- `scripts/cross-chain-wave.sh`: individual cross-chain workload modes and the
+  `EEZ_WAVE_OPS` dispatch.
+- `scripts/example-ext-op.sh`: reference external wave op.
 - `scripts/verify-cross-chain-waves.sh`: complete workload suite.
+- `scripts/verify-harness-hooks.sh`: hermetic checks over the external-consumer
+  hooks — the deployment seam, the op dispatch, and the package API.
