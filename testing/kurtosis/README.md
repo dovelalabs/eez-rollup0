@@ -652,6 +652,11 @@ Kurtosis assigns different host ports automatically. Remember that
   and the genesis state-root utility copied from the selected node image.
 - `start.sh` and `stop.sh`: local network lifecycle.
 - `ports.sh`: endpoint discovery, summary, and shell exports.
+- `env.sh`: per-shell session init for manual work — resolves the enclave's
+  randomised ports, deployment addresses, and dev keys, and reports whether
+  settlement is still inside the prover's window quota. Source it, don't run it.
+- `PLAYBOOK.md`: hands-on guide to driving a running enclave by hand (calling
+  contracts on L1 and L2, and reading L1 state from an L2 transaction).
 - `scripts/verify-eezl2-deployment.sh`: live EEZL2 deployment verification.
 - `scripts/verify-eezl2-blockscout.sh`: L2 Blockscout source verification for
   the genesis-installed EEZL2 contract.
