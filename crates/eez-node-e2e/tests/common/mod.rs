@@ -53,7 +53,7 @@ pub const ANVIL_ADDR_3: Address = address!("0x90F79bf6EB2c4f870365E785982E1f101E
 pub const L2_SYSTEM_KEY: &str =
     "0x6f7d72ecb79c8bf1bd8e7c49a1c4a22741ab708f06bb19e5b5d44a6f0934a7c1";
 
-// K = L1/L2 = 2 matches standalone's 2s cadence and leaves one L2 slot for proving.
+// K = L1/L2 = 2 leaves one L2 slot for proving.
 const L1_BLOCK_TIME_SECS: u64 = 4;
 
 // Consumed by the launcher as `--chain`; never forwarded to `eez-node`.
@@ -836,27 +836,6 @@ impl Harness {
         Chain::new(&self.anvil, &self.dep)
     }
 
-    /// Stages a local chain that can later restart as a composer or follower.
-    pub fn standalone_env(&self) -> Vec<(&'static str, String)> {
-        vec![
-            (
-                "EEZ_L1_BLOCK_TIME_MS",
-                (L1_BLOCK_TIME_SECS * 1000).to_string(),
-            ),
-            ("EEZ_L2_BLOCK_TIME_MS", "2000".to_string()),
-            ("EEZ_PROOF_TIME_MS", "1000".to_string()),
-            ("EEZ_SUBMISSION_SLACK_MS", "100".to_string()),
-            (
-                "RUST_LOG",
-                std::env::var("EEZ_TEST_LOG").unwrap_or_else(|_| "warn".to_string()),
-            ),
-            (
-                TEST_L2_GENESIS_ENV,
-                self.l2_genesis.0.to_string_lossy().into_owned(),
-            ),
-        ]
-    }
-
     /// Counts signer successes so negative tests cannot pass because proving stalled.
     pub fn successful_attestations(&self) -> Result<usize> {
         self.provers
@@ -1349,16 +1328,40 @@ pub enum NodeBinary {
     #[default]
     Composer,
     Follower,
-    Dev,
 }
 
 impl NodeBinary {
-    fn path(self) -> &'static str {
+    const fn name(self) -> &'static str {
         match self {
-            Self::Composer => env!("CARGO_BIN_EXE_eez-composer"),
-            Self::Follower => env!("CARGO_BIN_EXE_eez-follower"),
-            Self::Dev => env!("CARGO_BIN_EXE_eez-dev-node"),
+            Self::Composer => "eez-composer",
+            Self::Follower => "eez-follower",
         }
+    }
+
+    fn path(self) -> Result<PathBuf> {
+        let name = self.name();
+        if let Some(path) = std::env::var_os(format!("CARGO_BIN_EXE_{name}")) {
+            return Ok(path.into());
+        }
+
+        // Resolve at runtime so this harness also works when shared through a
+        // support crate, where Cargo does not expose `CARGO_BIN_EXE_*` to
+        // `env!`. Test executables sit in `<target>/<profile>/deps`, alongside
+        // the role binaries' parent directory.
+        let current = std::env::current_exe().context("current test executable")?;
+        let target_profile = current
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or_else(|| anyhow!("test executable has no target profile directory"))?;
+        let path = target_profile.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        if path.is_file() {
+            return Ok(path);
+        }
+
+        bail!(
+            "{name} binary not found next to the test profile at {}; build the node-role binaries before running the harness",
+            target_profile.display(),
+        )
     }
 }
 
@@ -1415,7 +1418,7 @@ impl NodeHandle {
             .map(|p| p.as_os_str().to_owned())
             .or(env_genesis)
             .unwrap_or_else(|| std::ffi::OsString::from("dev"));
-        let mut cmd = Command::new(cfg.binary.path());
+        let mut cmd = Command::new(cfg.binary.path()?);
         // Each role binary loads dotenv files from its working directory. Running from
         // the datadir prevents repository settings from changing the explicit
         // test configuration or redirecting L1 traffic to a developer endpoint.

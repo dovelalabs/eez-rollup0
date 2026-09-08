@@ -1587,10 +1587,11 @@ where
             None => None,
         };
 
-        let mut replayed: u64 = 0;
         // Hash of the Sync block replayed this pass; the gate must read by hash.
         let mut sync_block_hash: Option<B256> = None;
         let stale_boundary = !local_batch_boundary_matches(&self.inner.l2_provider, from_block)?;
+        let mut suffix_replay = SuffixReplay::new(stale_boundary);
+        let mut replayed: u64 = 0;
         let last_index = decoded.block_tx_counts.len().saturating_sub(1);
         let resumed = settlement.start > 0;
         if resumed {
@@ -1711,7 +1712,7 @@ where
                 } else {
                     local_block_matches(&self.inner.l2_provider, l2_block, &block_txs)?
                 };
-                let should_replay = stale_boundary || replayed > 0 || !matched;
+                let should_replay = suffix_replay.required(matched);
                 event!(
                     name: "eez.deriver.reconcile.block",
                     Level::DEBUG,
@@ -1829,11 +1830,10 @@ where
     /// - `claimed_new_state` (last state update's `newState`) vs the local
     ///   root at `to_block`.
     ///
-    /// Both ends are checked — the composer chains deltas across
-    /// entries, so checking one would let a crafted chain pass. Matters
-    /// under the mock prover, which can't enforce linearity; halting
-    /// here surfaces the mismatch at its origin rather than at our next
-    /// post's `StateRootMismatch`.
+    /// Both ends are checked — the composer chains deltas across entries, so
+    /// checking one would let a crafted chain pass. Halting here surfaces a
+    /// mismatch at its origin rather than at our next post's
+    /// `StateRootMismatch`.
     ///
     /// `entry_root` is [`eez_l1::Settlement::entry_state`], not the claimed chain
     /// head — the claimed head would contradict the cursor guard on a mid-chain resume.
@@ -2075,6 +2075,52 @@ where
         .hash();
 
     Ok(local_block.header().parent_hash == expected_parent_hash)
+}
+
+/// Once one block in a batch must be replayed, every descendant in that batch
+/// must be rebuilt on the new parent even when its transaction list matches.
+#[derive(Debug, Clone, Copy)]
+struct SuffixReplay {
+    active: bool,
+}
+
+impl SuffixReplay {
+    const fn new(stale_boundary: bool) -> Self {
+        Self {
+            active: stale_boundary,
+        }
+    }
+
+    const fn required(&mut self, local_matches: bool) -> bool {
+        self.active |= !local_matches;
+        self.active
+    }
+}
+
+#[cfg(test)]
+mod suffix_replay_tests {
+    use super::SuffixReplay;
+
+    fn decisions(stale_boundary: bool, local_matches: &[bool]) -> Vec<bool> {
+        let mut suffix = SuffixReplay::new(stale_boundary);
+        local_matches
+            .iter()
+            .map(|matches| suffix.required(*matches))
+            .collect()
+    }
+
+    #[test]
+    fn mismatch_replays_every_later_descendant() {
+        assert_eq!(
+            decisions(false, &[true, false, true, true]),
+            [false, true, true, true],
+        );
+    }
+
+    #[test]
+    fn stale_boundary_replays_the_complete_batch() {
+        assert_eq!(decisions(true, &[true, true, true]), [true, true, true]);
+    }
 }
 
 /// Which producing entries L1 ran, projected onto the partitioned
