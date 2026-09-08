@@ -8,7 +8,7 @@
 #
 # Remote consumption:
 #
-#     kurtosis run github.com/dovelalabs/eez-rollup0/testing/kurtosis \
+#     kurtosis run github.com/inertialabs/eez-rollup0/testing/kurtosis \
 #         '{"eez": {...}}'
 #
 # A remote run evaluates this file directly and never runs `start.sh`, so it
